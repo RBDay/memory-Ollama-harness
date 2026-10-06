@@ -1,0 +1,267 @@
+{
+  "info": {
+    "_postman_id": "c1f7a83d-98e3-4f1b-a27b-e99d3e8e2026",
+    "name": "Memory Ollama API",
+    "description": "Colección completa para interactuar con la API de Memory Ollama (FastAPI + MongoDB + Ollama con contexto y persistencia de memoria).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8001",
+      "type": "string"
+    },
+    {
+      "key": "sessionId",
+      "value": "test-session-1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "00. General & Health",
+      "item": [
+        {
+          "name": "Root - Estado API",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            },
+            "description": "Verifica que la API está levantada y devuelve enlaces a Swagger y versión."
+          },
+          "response": []
+        },
+        {
+          "name": "Health Check - Estado MongoDB y Ollama",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Comprueba el ping contra MongoDB y la conectividad/modelos de Ollama."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "01. Sessions",
+      "item": [
+        {
+          "name": "Crear Sesión",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"mi-sesion-python\",\n  \"title\": \"Asistente Python y Docker\",\n  \"system_prompt\": \"Eres un asistente experto en programación Python y Docker. Respondes siempre en español de forma concisa y amigable.\",\n  \"model\": \"qwen2.5-coder:7b\",\n  \"metadata\": {\n    \"environment\": \"development\",\n    \"user\": \"platano\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "description": "Registra una nueva sesión en la colección 'sessions' de MongoDB definiendo su propio contexto inicial (system_prompt)."
+          },
+          "response": []
+        },
+        {
+          "name": "Listar Sesiones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/?skip=0&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", ""],
+              "query": [
+                {
+                  "key": "skip",
+                  "value": "0",
+                  "description": "Elementos a omitir para paginación"
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Número máximo de resultados"
+                }
+              ]
+            },
+            "description": "Obtiene la lista de sesiones ordenadas por fecha de actualización, incluyendo conteo de mensajes en memoria."
+          },
+          "response": []
+        },
+        {
+          "name": "Obtener Sesión por ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{sessionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{sessionId}}"]
+            },
+            "description": "Recupera la configuración y metadatos de una sesión específica."
+          },
+          "response": []
+        },
+        {
+          "name": "Actualizar Sesión (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Nuevo título de sesión\",\n  \"system_prompt\": \"Eres un asistente avanzado que analiza código.\",\n  \"model\": \"qwen2.5-coder:7b\",\n  \"metadata\": {\n    \"updated\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{sessionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{sessionId}}"]
+            },
+            "description": "Actualiza el system_prompt, título o modelo de la sesión."
+          },
+          "response": []
+        },
+        {
+          "name": "Enviar Mensaje con Memoria (Chat en Sesión)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Hola, me llamo Carlos y estoy probando la memoria en MongoDB.\",\n  \"temperature\": 0.7\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{sessionId}}/chat",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{sessionId}}", "chat"]
+            },
+            "description": "Reconstruye todo el contexto previo desde la colección 'memory', consulta a Ollama y persiste el nuevo intercambio."
+          },
+          "response": []
+        },
+        {
+          "name": "Obtener Memoria / Historial de Sesión",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{sessionId}}/memory",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{sessionId}}", "memory"]
+            },
+            "description": "Devuelve la lista cronológica de mensajes almacenados en la colección 'memory' para esta sesión."
+          },
+          "response": []
+        },
+        {
+          "name": "Vaciar Memoria de Sesión (Reset)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{sessionId}}/memory",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{sessionId}}", "memory"]
+            },
+            "description": "Elimina todos los mensajes de la colección 'memory' para esta sesión, conservando la sesión y su configuración inicial."
+          },
+          "response": []
+        },
+        {
+          "name": "Eliminar Sesión Completa",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{sessionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{sessionId}}"]
+            },
+            "description": "Elimina la sesión de la colección 'sessions' y borra en cascada todos sus mensajes en 'memory'."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02. Memory",
+      "item": [
+        {
+          "name": "Chat Directo vía Memory Endpoint",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"{{sessionId}}\",\n  \"content\": \"¿Recuerdas cuál era mi nombre?\",\n  \"temperature\": 0.5\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/memory/chat",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "memory", "chat"]
+            },
+            "description": "Endpoint alternativo pasando session_id en el payload. Reconstruye contexto, consulta a Ollama y persiste en MongoDB."
+          },
+          "response": []
+        },
+        {
+          "name": "Consultar Historial vía Memory Endpoint",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/memory/{{sessionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "memory", "{{sessionId}}"]
+            },
+            "description": "Recupera los mensajes almacenados en 'memory' para la sesión indicada."
+          },
+          "response": []
+        },
+        {
+          "name": "Vaciar Memoria vía Memory Endpoint",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/memory/{{sessionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "memory", "{{sessionId}}"]
+            },
+            "description": "Borra el historial almacenado en 'memory' de la sesión indicada."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

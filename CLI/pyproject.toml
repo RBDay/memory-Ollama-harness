@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollama-local-chat-memory"
+version = "1.0.0"
+description = "CLI interactivo para chatear con modelos locales de Ollama con sesiones y memoria persistente en MongoDB"
+dependencies = [
+    "httpx>=0.25.0",
+    "rich>=13.0.0",
+]
+requires-python = ">=3.9"
+
+[project.scripts]
+ollama_local_chat_memory = "app.main:main"

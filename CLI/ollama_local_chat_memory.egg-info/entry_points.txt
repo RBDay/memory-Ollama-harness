@@ -1,0 +1,2 @@
+[console_scripts]
+ollama_local_chat_memory = app.main:main

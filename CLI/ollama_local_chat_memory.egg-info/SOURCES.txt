@@ -1,0 +1,12 @@
+pyproject.toml
+setup.py
+app/__init__.py
+app/api_client.py
+app/main.py
+app/ui.py
+ollama_local_chat_memory.egg-info/PKG-INFO
+ollama_local_chat_memory.egg-info/SOURCES.txt
+ollama_local_chat_memory.egg-info/dependency_links.txt
+ollama_local_chat_memory.egg-info/entry_points.txt
+ollama_local_chat_memory.egg-info/requires.txt
+ollama_local_chat_memory.egg-info/top_level.txt

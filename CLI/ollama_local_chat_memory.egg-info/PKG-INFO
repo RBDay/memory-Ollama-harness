@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: ollama-local-chat-memory
+Version: 1.0.0
+Summary: CLI interactivo para chatear con modelos locales de Ollama con sesiones y memoria persistente en MongoDB
+Requires-Python: >=3.9
+Requires-Dist: httpx>=0.25.0
+Requires-Dist: rich>=13.0.0
