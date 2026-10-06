@@ -10,7 +10,7 @@ Toda la infraestructura de la API corre aislada dentro de un contenedor **Docker
 ## 🛠️ Tecnologías Utilizadas
 
 * **Python 3.11 & FastAPI:** Framework asíncrono de alto rendimiento para exponer la API REST.
-* **SQLite:** Base de datos relacional ligera sin servidor que almacena el historial de conversaciones de forma persistente en disco.
+* **Mongo DB:** Base de datos no relacional ligera que almacena el historial de conversaciones de forma persistente en disco.
 * **Docker & Docker Compose:** Entorno de despliegue para la API y la base de datos, garantizando portabilidad sin ensuciar el sistema base.
 * **Ollama (`qwen2.5-coder:7b`):** Motor de inferencia local para ejecutar el LLM en la GPU del sistema.
 * **OpenAI Python Client:** Librería utilizada para comunicarse con Ollama aprovechando su compatibilidad con la API de OpenAI.

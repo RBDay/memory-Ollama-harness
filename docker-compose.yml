@@ -1,0 +1,59 @@
+services:
+  # database 
+  mongo:
+    image: mongo:7.0
+    container_name: harness-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: always
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: harness-mongo-express
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongo
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_BASICAUTH: "false"
+    depends_on:
+      - mongo
+    restart: always
+
+  #api local
+  api:
+    build:
+      context: ./API
+    container_name: harness-api
+    ports:
+      - "8001:8000"
+    depends_on:
+      - mongo
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - MODEL_NAME=qwen2.5-coder:7b
+      - MONGO_URI=mongodb://mongo:27017/
+      - DATABASE_NAME=memory
+    volumes:
+      - ./API/app:/app/app
+    restart: always
+
+  #servicio de CLI para los commands
+  cli:
+    build:
+      context: ./CLI
+    container_name: harness-cli
+    depends_on:
+      - api
+    stdin_open: true
+    tty: true
+    #command: tail -f /dev/null   # Mantiene el contenedor encendido
+    environment:
+      - API_URL=http://api:8000/api/v1
+
+volumes:
+  mongo-data:
