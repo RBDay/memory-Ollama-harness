@@ -86,7 +86,7 @@ services:
       - api
     stdin_open: true
     tty: true
-    #command: tail -f /dev/null   # Mantiene el contenedor encendido
+    command: tail -f /dev/null   # Mantiene el contenedor encendido
     environment:
       - API_URL=http://api:8000/api/v1
 

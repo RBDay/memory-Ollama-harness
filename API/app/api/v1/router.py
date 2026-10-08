@@ -11,6 +11,12 @@ api_v1_router.include_router(
 )
 
 api_v1_router.include_router(
+    sessions_router,
+    prefix="/session",
+    tags=["Session"],
+)
+
+api_v1_router.include_router(
     memory_router,
     prefix="/memory",
     tags=["Memory"],

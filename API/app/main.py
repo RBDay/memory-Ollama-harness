@@ -41,6 +41,15 @@ app.add_middleware(
 # Inclusión del enrutador de la API v1
 app.include_router(api_v1_router, prefix=settings.API_V1_STR)
 
+# Aliases de endpoints directos (/api/session, /api/sessions y /api/memory)
+from app.api.v1.endpoints.sessions import router as sessions_router
+from app.api.v1.endpoints.memory import router as memory_router
+from app.services.vector_service import vector_service
+
+app.include_router(sessions_router, prefix="/api/session", tags=["Session"])
+app.include_router(sessions_router, prefix="/api/sessions", tags=["Sessions"])
+app.include_router(memory_router, prefix="/api/memory", tags=["Memory"])
+
 
 @app.get("/", tags=["General"])
 async def root():
@@ -56,7 +65,7 @@ async def root():
 
 @app.get("/health", tags=["General"])
 async def health_check():
-    """Verificación de salud de la API, conexión con MongoDB y conectividad con Ollama."""
+    """Verificación de salud de la API, conexión con MongoDB, MinIO y conectividad con Ollama."""
     mongo_status = "healthy"
     try:
         if db.client:
@@ -66,11 +75,20 @@ async def health_check():
     except Exception as e:
         mongo_status = f"error: {str(e)}"
 
+    minio_status = "healthy"
+    try:
+        vector_service.ensure_bucket()
+    except Exception as e:
+        minio_status = f"degraded: {str(e)}"
+
     ollama_status = await ollama_service.check_health()
 
+    is_healthy = mongo_status == "healthy" and not minio_status.startswith("degraded")
+
     return {
-        "status": "ok" if mongo_status == "healthy" else "degraded",
+        "status": "ok" if is_healthy else "degraded",
         "mongo": mongo_status,
+        "minio": minio_status,
         "ollama": ollama_status,
         "database_name": settings.DATABASE_NAME,
         "collections": {

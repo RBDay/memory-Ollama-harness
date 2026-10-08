@@ -122,6 +122,22 @@ class VectorService:
                 logger.warning(f"Error al procesar PDF '{filename}': {e}")
                 return []
 
+        # Descartar archivos binarios no textuales conocidos (imágenes, medios, ejecutables, etc.)
+        binary_extensions = (
+            ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".tiff",
+            ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
+            ".tar", ".gz", ".bz2", ".7z", ".rar",
+            ".pyc", ".pyo", ".pyd", ".so", ".dll", ".dylib", ".exe", ".bin",
+            ".woff", ".woff2", ".ttf", ".eot", ".otf",
+            ".parquet", ".lance", ".db", ".sqlite",
+        )
+        if any(lower_name.endswith(ext) for ext in binary_extensions):
+            return []
+
+        # Comprobar presencia de bytes nulos (indicador clásico de archivo binario)
+        if b"\x00" in content[:1024]:
+            return []
+
         # Caso 3: Archivos de texto plano / código fuente
         try:
             text = content.decode("utf-8")
@@ -175,6 +191,33 @@ class VectorService:
         self.ensure_bucket()
         for file_path, content in files:
             safe_path = self._safe_relative_path(file_path)
+
+            # Si el archivo es un archivo comprimido ZIP, desempaquetar cada archivo y guardarlo con su ruta
+            if safe_path.lower().endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                        for zip_info in zf.infolist():
+                            if zip_info.is_dir():
+                                continue
+                            try:
+                                member_path = self._safe_relative_path(zip_info.filename)
+                            except HTTPException:
+                                continue
+                            if member_path.startswith("__MACOSX/") or "/.git/" in member_path or member_path.startswith(".git/"):
+                                continue
+                            sub_content = zf.read(zip_info.filename)
+                            obj_name = f"files/{session_id}/{member_path}"
+                            self.minio_client.put_object(
+                                bucket_name=self.bucket_name,
+                                object_name=obj_name,
+                                data=io.BytesIO(sub_content),
+                                length=len(sub_content),
+                            )
+                    continue
+                except Exception as e:
+                    logger.warning(f"Error al descomprimir ZIP para almacenamiento individual en MinIO: {e}")
+
+            # Archivo normal
             obj_name = f"files/{session_id}/{safe_path}"
             try:
                 self.minio_client.put_object(

@@ -26,6 +26,13 @@ router = APIRouter()
 
 
 @router.post(
+    "",
+    response_model=Union[SessionResponse, SessionVectorResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear una sesión e indexar archivos opcionales",
+    include_in_schema=False,
+)
+@router.post(
     "/",
     response_model=Union[SessionResponse, SessionVectorResponse],
     status_code=status.HTTP_201_CREATED,
@@ -56,7 +63,6 @@ router = APIRouter()
                                 "description": "Rutas relativas opcionales en el mismo orden que files.",
                             },
                         },
-                        "required": ["files"],
                     }
                 },
             }
@@ -68,12 +74,18 @@ async def create_session(request: Request):
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
         uploads = [
-            item for field in ("files", "file")
-            for item in form.getlist(field)
-            if isinstance(item, StarletteUploadFile)
+            item for _, item in form.multi_items()
+            if isinstance(item, StarletteUploadFile) and item.filename
         ]
-        relative_paths = [str(path) for path in form.getlist("relative_paths")]
-        files = await _read_uploaded_files(uploads, relative_paths or None)
+        relative_paths = [str(path) for path in form.getlist("relative_paths") if str(path).strip()]
+        if not relative_paths:
+            relative_paths = [str(path) for path in form.getlist("relative_path") if str(path).strip()]
+
+        session_id = form.get("session_id") or form.get("id")
+        title = form.get("title") or "Nueva Sesión"
+        system_prompt = form.get("system_prompt") or form.get("prompt")
+        model = form.get("model")
+
         metadata: Dict[str, Any] = {}
         raw_metadata = form.get("metadata")
         if raw_metadata:
@@ -85,14 +97,19 @@ async def create_session(request: Request):
                 raise HTTPException(status_code=422, detail=f"Metadata inválida: {exc}") from exc
 
         data = SessionCreate(
-            session_id=form.get("session_id"),
-            title=form.get("title") or "Nueva Sesión",
-            system_prompt=form.get("system_prompt"),
-            model=form.get("model"),
+            session_id=str(session_id) if session_id else None,
+            title=str(title),
+            system_prompt=str(system_prompt) if system_prompt else None,
+            model=str(model) if model else None,
             metadata=metadata,
         )
-        session, vector_context = await session_service.create_session_with_files(data, files)
-        return SessionVectorResponse(session=session, vector_context=vector_context)
+
+        if uploads:
+            files = await _read_uploaded_files(uploads, relative_paths or None)
+            session, vector_context = await session_service.create_session_with_files(data, files)
+            return SessionVectorResponse(session=session, vector_context=vector_context)
+        else:
+            return await session_service.create_session(data)
 
     try:
         data = SessionCreate.model_validate(await request.json())
@@ -109,19 +126,25 @@ async def _read_uploaded_files(
     relative_paths: Optional[List[str]] = None,
 ) -> List[tuple[str, bytes]]:
     if not uploads:
-        raise HTTPException(status_code=422, detail="Debe proporcionar al menos un archivo en el campo 'files'.")
-    if relative_paths is not None and len(relative_paths) != len(uploads):
-        raise HTTPException(status_code=422, detail="Debe enviar una ruta relativa por cada archivo recibido.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe proporcionar al menos un archivo en el campo 'files' o 'file'.",
+        )
 
     files: List[tuple[str, bytes]] = []
     for index, upload in enumerate(uploads):
-        source_name = relative_paths[index] if relative_paths is not None else upload.filename
-        filename = (source_name or "").replace("\\", "/")
-        normalized = os.path.normpath(filename).replace("\\", "/")
-        if not filename or normalized in (".", "..") or normalized.startswith("../") or normalized.startswith("/"):
-            raise HTTPException(status_code=422, detail=f"Ruta de archivo no válida: {filename!r}")
-        files.append((normalized, await upload.read()))
+        source_name = (
+            relative_paths[index]
+            if (relative_paths and index < len(relative_paths) and relative_paths[index].strip())
+            else upload.filename
+        )
+        raw_name = (source_name or "archivo").replace("\\", "/")
+        normalized = os.path.normpath(raw_name).replace("\\", "/").lstrip("/")
+        if not normalized or normalized in (".", "..") or normalized.startswith("../"):
+            normalized = os.path.basename(raw_name) or f"archivo_{index}"
+        content = await upload.read()
         await upload.close()
+        files.append((normalized, content))
     return files
 
 
@@ -131,14 +154,38 @@ async def _read_uploaded_files(
     description="Elimina el contexto anterior de LanceDB y los archivos de MinIO y lo reconstruye con los archivos recibidos.",
 )
 async def refresh_session_context(
+    request: Request,
     session_id: str = Path(..., description="ID de la sesión"),
-    files: List[UploadFile] = File(..., description="Archivos a indexar; repetir este campo para varios archivos"),
-    relative_paths: Optional[List[str]] = Form(None, description="Rutas relativas opcionales, una por archivo y en el mismo orden"),
 ):
-    uploaded_files = await _read_uploaded_files(files, relative_paths)
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data"):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="El endpoint de refresh requiere multipart/form-data con archivos.",
+        )
+    form = await request.form()
+    uploads = [
+        item for _, item in form.multi_items()
+        if isinstance(item, StarletteUploadFile) and item.filename
+    ]
+    if not uploads:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe proporcionar al menos un archivo en 'files' o 'file'.",
+        )
+    relative_paths = [str(p) for p in form.getlist("relative_paths") if str(p).strip()]
+    if not relative_paths:
+        relative_paths = [str(p) for p in form.getlist("relative_path") if str(p).strip()]
+    uploaded_files = await _read_uploaded_files(uploads, relative_paths or None)
     return await session_service.refresh_session_vectors(session_id, uploaded_files)
 
 
+@router.get(
+    "",
+    response_model=SessionListResponse,
+    summary="Listar sesiones",
+    include_in_schema=False,
+)
 @router.get(
     "/",
     response_model=SessionListResponse,
