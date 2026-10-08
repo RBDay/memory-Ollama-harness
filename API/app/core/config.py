@@ -15,7 +15,21 @@ class Settings(BaseSettings):
     # Ollama Settings
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434/v1"
     MODEL_NAME: str = "qwen2.5-coder:7b"
+    EMBEDDING_MODEL: str = "nomic-embed-text"
     OLLAMA_TIMEOUT: float = 120.0
+
+    # MinIO / LanceDB Settings
+    MINIO_ENDPOINT: str = "http://minio:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadminpassword"
+    MINIO_BUCKET: str = "lancedb"
+    MINIO_REGION: str = "us-east-1"
+    MINIO_SECURE: bool = False
+
+    # Vector RAG Settings
+    CHUNK_SIZE: int = 500
+    CHUNK_OVERLAP: int = 50
+    VECTOR_TOP_K: int = 5
 
     model_config = SettingsConfigDict(
         env_file=(".env", "app/.env"),

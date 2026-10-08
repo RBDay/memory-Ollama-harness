@@ -13,7 +13,7 @@ services:
     image: mongo-express:latest
     container_name: harness-mongo-express
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081" #<---- solo accesible desde localhost
     environment:
       ME_CONFIG_MONGODB_SERVER: mongo
       ME_CONFIG_MONGODB_PORT: 27017
@@ -21,6 +21,22 @@ services:
     depends_on:
       - mongo
     restart: always
+
+  # El servidor de S3 local (MinIO) --> para los ficheros de LanceDB
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: local-minio
+    ports:
+      - "9000:9000"   # Puerto de la API S3
+      - "9001:9001"   # Panel web de administración de MinIO
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadminpassword"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
 
   # Puente: Ollama escucha solo en localhost del host. Este relay expone el
   # endpoint únicamente en la puerta de enlace Docker y lo reenvía a localhost.
@@ -43,13 +59,20 @@ services:
     depends_on:
       - mongo
       - ollama-proxy
+      - minio
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
       - MODEL_NAME=qwen2.5-coder:7b
+      - EMBEDDING_MODEL=nomic-embed-text
       - MONGO_URI=mongodb://mongo:27017/
       - DATABASE_NAME=memory
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadminpassword
+      - MINIO_BUCKET=lancedb
+      - MINIO_REGION=us-east-1
     volumes:
       - ./API/app:/app/app
     restart: always
@@ -69,3 +92,4 @@ services:
 
 volumes:
   mongo-data:
+  minio_data:

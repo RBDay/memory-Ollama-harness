@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 import httpx
@@ -121,6 +122,78 @@ class OllamaService:
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Tiempo de espera agotado al consultar a Ollama.",
             )
+
+    async def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+    ) -> List[float]:
+        """Genera el vector de embedding para un fragmento de texto usando Ollama."""
+        target_model = model or settings.EMBEDDING_MODEL
+        root_url = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        url = f"{root_url}/api/embeddings"
+        payload = {"model": target_model, "prompt": text}
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(url, json=payload)
+                if response.status_code != 200:
+                    logger.error(
+                        f"Error al generar embedding ({response.status_code}): {response.text}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Error al generar embedding en Ollama ({response.status_code}): {response.text}",
+                    )
+                data = response.json()
+                embedding = data.get("embedding", [])
+                if not embedding:
+                    # Intento alternativo para api/embed
+                    alt_url = f"{root_url}/api/embed"
+                    alt_payload = {"model": target_model, "input": text}
+                    alt_resp = await client.post(alt_url, json=alt_payload)
+                    if alt_resp.status_code == 200:
+                        alt_data = alt_resp.json()
+                        embeddings_list = alt_data.get("embeddings", [])
+                        if embeddings_list:
+                            return embeddings_list[0]
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Ollama retornó un vector de embedding vacío.",
+                    )
+                return embedding
+
+        except httpx.ConnectError as e:
+            logger.error(f"No se pudo conectar a Ollama para embeddings: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"No se pudo conectar al servicio Ollama en {self.base_url}. Asegúrate de que el modelo '{target_model}' esté disponible.",
+            )
+        except httpx.TimeoutException:
+            logger.error(f"Timeout al esperar embedding de Ollama ({self.timeout}s)")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Tiempo de espera agotado al generar embedding en Ollama.",
+            )
+
+    async def get_embeddings_batch(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        concurrency: int = 5,
+    ) -> List[List[float]]:
+        """Genera embeddings para una lista de textos de forma concurrente con semáforo."""
+        if not texts:
+            return []
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _embed_one(t: str) -> List[float]:
+            async with sem:
+                return await self.get_embedding(t, model=model)
+
+        tasks = [_embed_one(text) for text in texts]
+        return await asyncio.gather(*tasks)
 
 
 ollama_service = OllamaService()

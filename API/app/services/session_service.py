@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 from app.repositories.session_repository import session_repository, SessionRepository
 from app.repositories.memory_repository import memory_repository, MemoryRepository
+from app.services.vector_service import vector_service, VectorService
 from app.schemas.session import SessionCreate, SessionUpdate, SessionResponse, SessionListResponse
 
 
@@ -12,9 +13,11 @@ class SessionService:
         self,
         session_repo: Optional[SessionRepository] = None,
         memory_repo: Optional[MemoryRepository] = None,
+        vector_svc: Optional[VectorService] = None,
     ):
         self.session_repo = session_repo or session_repository
         self.memory_repo = memory_repo or memory_repository
+        self.vector_svc = vector_svc or vector_service
 
     async def create_session(self, data: SessionCreate) -> SessionResponse:
         """Crea una nueva sesión en MongoDB."""
@@ -46,6 +49,35 @@ class SessionService:
             message_count=0,
             metadata=created.get("metadata", {}),
         )
+
+    async def create_session_with_files(
+        self,
+        data: SessionCreate,
+        files: List[tuple[str, bytes]],
+    ) -> tuple[SessionResponse, Dict[str, Any]]:
+        """Crea una sesión e indexa sus archivos; revierte la sesión si falla la ingesta."""
+        session = await self.create_session(data)
+        try:
+            vector_context = await self.vector_svc.index_files_for_session(
+                session.session_id, files, mode="overwrite"
+            )
+        except Exception:
+            self.vector_svc.delete_session_vectors(session.session_id)
+            await self.memory_repo.delete_by_session(session.session_id)
+            await self.session_repo.delete(session.session_id)
+            raise
+        return session, vector_context
+
+    async def refresh_session_vectors(
+        self,
+        session_id: str,
+        files: List[tuple[str, bytes]],
+    ) -> Dict[str, Any]:
+        """Sustituye el contexto vectorial de una sesión existente."""
+        await self.get_session(session_id)
+        result = await self.vector_svc.refresh_session_vectors(session_id, files)
+        await self.session_repo.touch(session_id)
+        return result
 
     async def get_session(self, session_id: str) -> SessionResponse:
         """Obtiene los detalles de una sesión junto al conteo de mensajes."""
@@ -118,8 +150,9 @@ class SessionService:
         )
 
     async def delete_session(self, session_id: str) -> Dict[str, Any]:
-        """Elimina una sesión y borra en cascada su memoria asociada."""
+        """Elimina la sesión y sus memorias conversacional y vectorial asociadas."""
         await self.get_session(session_id)
+        vector_cleanup = self.vector_svc.delete_session_vectors(session_id)
         deleted_messages = await self.memory_repo.delete_by_session(session_id)
         deleted_session = await self.session_repo.delete(session_id)
 
@@ -127,7 +160,8 @@ class SessionService:
             "session_id": session_id,
             "deleted": deleted_session,
             "deleted_messages_count": deleted_messages,
-            "message": "Sesión y memoria asociada eliminadas con éxito.",
+            "deleted_vector_objects_count": vector_cleanup["deleted_objects_count"],
+            "message": "Sesión y memorias conversacional y vectorial eliminadas con éxito.",
         }
 
 

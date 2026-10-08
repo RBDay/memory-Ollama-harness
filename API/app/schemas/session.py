@@ -36,3 +36,9 @@ class SessionListResponse(BaseModel):
     """Schema de respuesta paginada para listar sesiones."""
     total: int
     sessions: List[SessionResponse]
+
+
+class SessionVectorResponse(BaseModel):
+    """Respuesta de creación de sesión con el resultado de indexar archivos."""
+    session: SessionResponse
+    vector_context: Dict[str, Any]

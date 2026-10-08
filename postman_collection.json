@@ -15,6 +15,11 @@
       "key": "sessionId",
       "value": "test-session-1",
       "type": "string"
+    },
+    {
+      "key": "vectorSessionId",
+      "value": "test-vector-session-1",
+      "type": "string"
     }
   ],
   "item": [
@@ -208,7 +213,176 @@
       ]
     },
     {
-      "name": "02. Memory",
+      "name": "02. Vector Memory (LanceDB + MinIO)",
+      "item": [
+        {
+          "name": "Crear sesión e indexar archivos (multipart)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    if (body.session && body.session.session_id) {",
+                  "        pm.collectionVariables.set('vectorSessionId', body.session.session_id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "session_id",
+                  "value": "vector-{{$guid}}",
+                  "type": "text"
+                },
+                {
+                  "key": "title",
+                  "value": "Sesión con documentos",
+                  "type": "text"
+                },
+                {
+                  "key": "system_prompt",
+                  "value": "Responde basándote en los documentos indexados cuando sean relevantes.",
+                  "type": "text"
+                },
+                {
+                  "key": "model",
+                  "value": "qwen2.5-coder:7b",
+                  "type": "text"
+                },
+                {
+                  "key": "metadata",
+                  "value": "{\"source\":\"postman\"}",
+                  "type": "text"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "relative_paths",
+                  "value": "docs/documento.txt",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "description": "Antes de enviar, selecciona un archivo local en la fila 'files'. Para subir varios, duplica las filas 'files' y 'relative_paths' en el mismo orden; relative_paths conserva la estructura de carpetas (un valor por cada archivo). No establezcas Content-Type manualmente: Postman añadirá el boundary multipart. Al responder, vectorSessionId se actualiza automáticamente con el ID creado. Requiere que Ollama tenga disponible EMBEDDING_MODEL y que MinIO esté accesible."
+          },
+          "response": []
+        },
+        {
+          "name": "Refrescar contexto vectorial (multipart)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "relative_paths",
+                  "value": "docs/documento-actualizado.txt",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{vectorSessionId}}/refresh",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{vectorSessionId}}", "refresh"]
+            },
+            "description": "Reemplaza el contexto LanceDB y los archivos almacenados en MinIO. Selecciona un archivo para cada fila 'files'. Si agregas archivos, agrega una fila relative_paths por archivo y mantén el mismo orden."
+          },
+          "response": []
+        },
+        {
+          "name": "Preguntar usando contexto vectorial (RAG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Resume los documentos que he subido y cita sus rutas.\",\n  \"temperature\": 0.2\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{vectorSessionId}}/chat",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{vectorSessionId}}", "chat"]
+            },
+            "description": "Envía una pregunta a la sesión para comprobar que el Harness recupera fragmentos pertinentes de LanceDB."
+          },
+          "response": []
+        },
+        {
+          "name": "Listar archivos guardados (recursivo)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{vectorSessionId}}/files",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{vectorSessionId}}", "files"]
+            },
+            "description": "Lista las rutas y tamaños de los archivos originales conservados en MinIO para esta sesión."
+          },
+          "response": []
+        },
+        {
+          "name": "Exportar archivos guardados como ZIP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{vectorSessionId}}/export",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{vectorSessionId}}", "export"]
+            },
+            "description": "Descarga un ZIP con todos los archivos de la sesión, respetando sus rutas relativas."
+          },
+          "response": []
+        },
+        {
+          "name": "Eliminar sesión y contexto vectorial",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sessions/{{vectorSessionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sessions", "{{vectorSessionId}}"]
+            },
+            "description": "Elimina la sesión, el historial conversacional y los objetos LanceDB/archivos correspondientes en MinIO."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03. Memory",
       "item": [
         {
           "name": "Chat Directo vía Memory Endpoint",
