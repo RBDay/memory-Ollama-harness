@@ -44,8 +44,18 @@ class APIClient:
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         session_id: Optional[str] = None,
+        files: Optional[List[tuple]] = None,
     ) -> Dict[str, Any]:
-        """Crea una nueva sesión."""
+        """Crea una nueva sesión, opcionalmente con archivos para memoria vectorial LanceDB."""
+        if files:
+            return self.create_session_with_files(
+                title=title,
+                files=files,
+                system_prompt=system_prompt,
+                model=model,
+                session_id=session_id,
+            )
+
         payload: Dict[str, Any] = {"title": title}
         if system_prompt:
             payload["system_prompt"] = system_prompt
@@ -59,8 +69,77 @@ class APIClient:
             resp.raise_for_status()
             return resp.json()
 
+    def create_session_with_files(
+        self,
+        title: str,
+        files: List[tuple],
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Crea una nueva sesión indexando archivos/carpetas en LanceDB y MinIO."""
+        data_dict: Dict[str, Any] = {"title": title, "relative_paths": []}
+        if system_prompt:
+            data_dict["system_prompt"] = system_prompt
+        if model:
+            data_dict["model"] = model
+        if session_id:
+            data_dict["session_id"] = session_id
+
+        files_payload: List[tuple] = []
+        for rel_path, content in files:
+            data_dict["relative_paths"].append(rel_path)
+            files_payload.append(
+                ("files", (os.path.basename(rel_path) or "archivo", content, "application/octet-stream"))
+            )
+
+        with self._client() as client:
+            resp = client.post("/sessions/", data=data_dict, files=files_payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    def refresh_session_files(
+        self,
+        session_id: str,
+        files: List[tuple],
+    ) -> Dict[str, Any]:
+        """Reemplaza el contexto vectorial anterior en LanceDB y MinIO con nuevos archivos."""
+        data_dict: Dict[str, Any] = {"relative_paths": []}
+        files_payload: List[tuple] = []
+        for rel_path, content in files:
+            data_dict["relative_paths"].append(rel_path)
+            files_payload.append(
+                ("files", (os.path.basename(rel_path) or "archivo", content, "application/octet-stream"))
+            )
+
+        with self._client() as client:
+            resp = client.put(f"/sessions/{session_id}/refresh", data=data_dict, files=files_payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    def list_session_files(self, session_id: str) -> Dict[str, Any]:
+        """Lista todos los archivos almacenados en MinIO/LanceDB para una sesión."""
+        with self._client() as client:
+            resp = client.get(f"/sessions/{session_id}/files")
+            resp.raise_for_status()
+            return resp.json()
+
+    def export_session_files(
+        self,
+        session_id: str,
+        destination_path: Optional[str] = None,
+    ) -> str:
+        """Descarga todos los archivos de la sesión en un archivo ZIP recursivo."""
+        output_file = destination_path or f"session-{session_id}-files.zip"
+        with self._client() as client:
+            resp = client.get(f"/sessions/{session_id}/export")
+            resp.raise_for_status()
+            with open(output_file, "wb") as f:
+                f.write(resp.content)
+        return output_file
+
     def delete_session(self, session_id: str) -> Dict[str, Any]:
-        """Elimina una sesión y toda su memoria."""
+        """Elimina una sesión y toda su memoria (conversacional y vectorial)."""
         with self._client() as client:
             resp = client.delete(f"/sessions/{session_id}")
             resp.raise_for_status()
@@ -98,3 +177,38 @@ class APIClient:
             resp = client.post(f"/sessions/{session_id}/chat", json=payload)
             resp.raise_for_status()
             return resp.json()
+
+
+def collect_files_from_paths(paths: List[str]) -> List[tuple]:
+    """
+    Escanea rutas de archivos y carpetas locales de forma recursiva.
+    Retorna una lista de tuplas (ruta_relativa, contenido_bytes).
+    Ignora carpetas de control de versiones y entornos virtuales.
+    """
+    collected: List[tuple] = []
+    ignored_patterns = {".git", "__pycache__", ".venv", "venv", ".idea", ".vscode", ".DS_Store"}
+
+    for p in paths:
+        abs_p = os.path.abspath(p)
+        if not os.path.exists(abs_p):
+            raise FileNotFoundError(f"No se encontró la ruta: '{p}'")
+
+        if os.path.isfile(abs_p):
+            rel_name = os.path.basename(abs_p)
+            with open(abs_p, "rb") as f:
+                collected.append((rel_name, f.read()))
+        elif os.path.isdir(abs_p):
+            root_name = os.path.basename(abs_p) or "carpeta"
+            for root, dirs, files in os.walk(abs_p):
+                dirs[:] = [d for d in dirs if d not in ignored_patterns and not d.startswith(".")]
+                for fname in files:
+                    if fname in ignored_patterns or fname.startswith("."):
+                        continue
+                    full_file = os.path.join(root, fname)
+                    rel_to_dir = os.path.relpath(full_file, abs_p).replace("\\", "/")
+                    rel_path = f"{root_name}/{rel_to_dir}".lstrip("/")
+                    with open(full_file, "rb") as f:
+                        collected.append((rel_path, f.read()))
+
+    return collected
+

@@ -115,7 +115,12 @@ def print_history_banner(displayed: int, total: int):
         print(f"--- Historial previo ({displayed} mensajes) ---")
 
 
-def render_message(role: str, content: str, model: Optional[str] = None):
+def render_message(
+    role: str,
+    content: str,
+    model: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
     if RICH_AVAILABLE:
         if role == "user":
             console.print(f"[bold cyan]🧑 Tú:[/bold cyan] {content}\n")
@@ -123,9 +128,92 @@ def render_message(role: str, content: str, model: Optional[str] = None):
             header = f"[bold green]🤖 Ollama ({model or 'assistant'}):[/bold green]"
             console.print(header)
             console.print(Markdown(content))
+            if metadata:
+                v_chunks = metadata.get("vector_chunks_used", 0)
+                v_sources = metadata.get("vector_sources", [])
+                if v_chunks > 0 and v_sources:
+                    sources_str = ", ".join(v_sources[:4])
+                    if len(v_sources) > 4:
+                        sources_str += f" (+{len(v_sources) - 4} más)"
+                    console.print(f"\n[dim cyan]📚 Contexto vectorial LanceDB:[/] [dim]{sources_str} ({v_chunks} fragmentos)[/dim]")
             console.print()
         elif role == "system":
             console.print(f"[bold magenta]⚙ Sistema:[/bold magenta] [dim]{content}[/dim]\n")
     else:
         prefix = "Tú" if role == "user" else f"Ollama ({model or 'assistant'})"
-        print(f"[{prefix}]: {content}\n")
+        print(f"[{prefix}]: {content}")
+        if metadata and metadata.get("vector_chunks_used", 0) > 0:
+            sources_str = ", ".join(metadata.get("vector_sources", [])[:3])
+            print(f"[Contexto vectorial LanceDB: {sources_str}]")
+        print()
+
+
+def format_size(size_bytes: int) -> str:
+    """Formatea bytes a formato legible (B, KB, MB, GB)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def print_files_table(session_id: str, files: List[Dict[str, Any]]):
+    """Muestra la tabla de archivos indexados en LanceDB/MinIO para la sesión."""
+    if not files:
+        if RICH_AVAILABLE:
+            console.print(f"[yellow]La sesión '[cyan]{session_id}[/cyan]' no tiene archivos indexados en LanceDB.[/yellow]")
+        else:
+            print(f"La sesión '{session_id}' no tiene archivos indexados.")
+        return
+
+    if RICH_AVAILABLE:
+        table = Table(
+            title=f"Archivos en Memoria Vectorial (Sesión: {session_id})",
+            box=ROUNDED,
+            header_style="bold magenta",
+        )
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Ruta Relativa del Archivo", style="cyan")
+        table.add_column("Tamaño", style="green", justify="right")
+        table.add_column("Última Modificación", style="dim")
+
+        for i, f in enumerate(files, 1):
+            table.add_row(
+                str(i),
+                f.get("file_path", ""),
+                format_size(f.get("size_bytes", 0)),
+                f.get("last_modified", "-"),
+            )
+        console.print(table)
+    else:
+        print(f"\n--- ARCHIVOS EN MEMORIA VECTORIAL ({session_id}) ---")
+        for i, f in enumerate(files, 1):
+            print(f"[{i}] {f.get('file_path')} ({format_size(f.get('size_bytes', 0))})")
+
+
+def print_vector_context_summary(vector_context: Dict[str, Any]):
+    """Muestra un resumen de la ingesta e indexación en LanceDB."""
+    files_count = vector_context.get("files_count", 0)
+    chunks_count = vector_context.get("chunks_count", 0)
+    model = vector_context.get("embedding_model", "-")
+    dim = vector_context.get("vector_dimension", "-")
+    files = vector_context.get("indexed_files", [])
+
+    if RICH_AVAILABLE:
+        content = (
+            f"[bold green]✔ Memoria Vectorial LanceDB Generada[/bold green]\n\n"
+            f"• [bold]Archivos indexados:[/] [cyan]{files_count}[/]\n"
+            f"• [bold]Fragmentos (chunks):[/] [yellow]{chunks_count}[/]\n"
+            f"• [bold]Modelo de embeddings:[/] [green]{model}[/] (dimensión: {dim})\n"
+        )
+        if files:
+            preview = ", ".join(files[:5])
+            if len(files) > 5:
+                preview += f" ... (+{len(files) - 5} más)"
+            content += f"• [bold]Archivos:[/] [dim]{preview}[/dim]"
+        console.print(Panel(content, border_style="cyan", box=ROUNDED))
+    else:
+        print(f"[OK] Memoria Vectorial: {files_count} archivos, {chunks_count} chunks (modelo: {model})")
+
