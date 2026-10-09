@@ -4,6 +4,11 @@ import io
 import uuid
 import zipfile
 import logging
+import xml.etree.ElementTree as ET
+import dis
+import marshal
+import struct
+import re
 from typing import List, Dict, Any, Tuple
 import pyarrow as pa
 import lancedb
@@ -61,9 +66,13 @@ class VectorService:
 
     @staticmethod
     def _safe_relative_path(file_path: str) -> str:
-        """Normaliza una ruta subida y rechaza rutas absolutas o que salgan de su raíz."""
-        normalized = posixpath.normpath((file_path or "").replace("\\", "/"))
-        if normalized in ("", ".", "..") or normalized.startswith("../") or normalized.startswith("/"):
+        """Normaliza una ruta subida asegurando que sea relativa y segura."""
+        clean = (file_path or "").replace("\\", "/").strip().lstrip("/")
+        normalized = posixpath.normpath(clean)
+        if normalized in ("", ".", "..") or normalized.startswith("../"):
+            base = posixpath.basename(clean)
+            if base and base not in (".", ".."):
+                return base
             raise HTTPException(
                 status_code=422,
                 detail=f"Ruta de archivo no válida: {file_path!r}",
@@ -74,16 +83,94 @@ class VectorService:
         """Retorna la URI S3 de LanceDB para la sesión."""
         return f"s3://{self.bucket_name}/sessions/{session_id}"
 
+    @staticmethod
+    def _extract_java_class(content: bytes) -> str:
+        """Extrae nombres de clases, métodos, firmas y cadenas de un archivo compilado .class de Java."""
+        if not content.startswith(b"\xca\xfe\xba\xbe") or len(content) < 10:
+            return ""
+        try:
+            cp_count = struct.unpack(">H", content[8:10])[0]
+            pos = 10
+            strings = []
+            i = 1
+            while i < cp_count and pos < len(content):
+                tag = content[pos]
+                pos += 1
+                if tag == 1:  # CONSTANT_Utf8
+                    length = struct.unpack(">H", content[pos : pos + 2])[0]
+                    pos += 2
+                    try:
+                        s = content[pos : pos + length].decode("utf-8", errors="ignore")
+                        if len(s) > 1 and any(c.isalnum() for c in s):
+                            strings.append(s)
+                    except Exception:
+                        pass
+                    pos += length
+                elif tag in (3, 4):  # Integer, Float
+                    pos += 4
+                elif tag in (5, 6):  # Long, Double
+                    pos += 8
+                    i += 1
+                elif tag in (7, 8, 16, 19, 20):  # Class, String, MethodType, Module, Package
+                    pos += 2
+                elif tag in (9, 10, 11, 12, 18):  # Fieldref, Methodref, InterfaceMethodref, NameAndType, InvokeDynamic
+                    pos += 4
+                elif tag == 15:  # MethodHandle
+                    pos += 3
+                else:
+                    break
+                i += 1
+            if strings:
+                return f"[Símbolos y definiciones Java .class]:\n" + ", ".join(strings)
+            return ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _disassemble_pyc(filename: str, content: bytes) -> List[Tuple[str, str]]:
+        """Desensambla bytecode de Python (.pyc/.pyo) y extrae cadenas, docstrings e instrucciones."""
+        dis_text = ""
+        const_strings = []
+        for offset in (16, 12, 8):
+            try:
+                co = marshal.loads(content[offset:])
+                out = io.StringIO()
+                dis.dis(co, file=out)
+                dis_text = out.getvalue()
+                if hasattr(co, "co_consts"):
+                    const_strings = [str(c) for c in co.co_consts if isinstance(c, (str, bytes)) and len(str(c).strip()) > 1]
+                if dis_text:
+                    break
+            except Exception:
+                continue
+
+        if dis_text:
+            parts = [f"--- Desensamblado Bytecode Python: {filename} ---", dis_text]
+            if const_strings:
+                parts.append("--- Constantes y Docstrings:\n" + "\n".join(const_strings[:50]))
+            return [(filename, "\n\n".join(parts))]
+
+        # Fallback si marshal falla: extraer cadenas legibles del binario
+        matches = re.findall(rb"[a-zA-Z0-9_\.\-\:\/\(\)\s]{4,}", content)
+        readable = " ".join(m.decode("latin-1", errors="ignore") for m in matches if len(m) > 3)
+        if readable.strip():
+            return [(filename, f"[Contenido legible extraído de pyc {filename}]:\n{readable}")]
+
+        return []
+
     def extract_text_from_file(self, filename: str, content: bytes) -> List[Tuple[str, str]]:
         """
-        Extrae el contenido textual de un archivo o conjunto de archivos (si es ZIP).
+        Extrae el contenido textual de un archivo o conjunto de archivos (si es ZIP/JAR).
+        Soporta archivos de programación (.php, .py, .js, .ts, .java, .c, .cpp, .cs, .go, .rs, .rb, etc.),
+        bytecode (.pyc, .pyo, .class), empaquetados (.jar, .war, .zip), logs (.log), documentos Office y PDF.
         Retorna una lista de tuplas (ruta_relativa, texto).
         """
         lower_name = filename.lower()
+        base_name = os.path.basename(lower_name)
         extracted: List[Tuple[str, str]] = []
 
-        # Caso 1: Archivo ZIP (descomprimir y procesar de manera recursiva)
-        if lower_name.endswith(".zip"):
+        # Caso 1: Archivo ZIP o JAR/WAR/EAR (descomprimir y procesar de manera recursiva)
+        if lower_name.endswith((".zip", ".jar", ".war", ".ear")):
             try:
                 with zipfile.ZipFile(io.BytesIO(content)) as zf:
                     for zip_info in zf.infolist():
@@ -92,7 +179,6 @@ class VectorService:
                         try:
                             member_path = self._safe_relative_path(zip_info.filename)
                         except HTTPException:
-                            logger.warning("Se omitió una ruta no válida dentro de '%s'.", filename)
                             continue
                         # Omitir archivos del sistema o metadatos
                         if member_path.startswith("__MACOSX/") or "/.git/" in member_path or member_path.startswith(".git/"):
@@ -102,10 +188,92 @@ class VectorService:
                         extracted.extend(sub_extracted)
                 return extracted
             except Exception as e:
-                logger.warning(f"Error al descomprimir archivo ZIP '{filename}': {e}")
+                logger.warning(f"Error al descomprimir archivo ZIP/JAR '{filename}': {e}")
                 return []
 
-        # Caso 2: Archivo PDF
+        # Caso 2: Archivos compilados Python (.pyc, .pyo)
+        if lower_name.endswith((".pyc", ".pyo")):
+            return self._disassemble_pyc(filename, content)
+
+        # Caso 3: Archivos compilados Java (.class)
+        if lower_name.endswith(".class"):
+            class_text = self._extract_java_class(content)
+            if class_text:
+                return [(filename, class_text)]
+            return []
+
+        # Caso 4: Documento Word (.docx)
+        if lower_name.endswith(".docx"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                    if "word/document.xml" in zf.namelist():
+                        xml_content = zf.read("word/document.xml")
+                        tree = ET.fromstring(xml_content)
+                        paragraphs = []
+                        for p in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+                            texts = [
+                                node.text
+                                for node in p.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+                                if node.text
+                            ]
+                            if texts:
+                                paragraphs.append("".join(texts))
+                        full_text = "\n\n".join(paragraphs)
+                        if full_text.strip():
+                            extracted.append((filename, full_text))
+                return extracted
+            except Exception as e:
+                logger.warning(f"Error al procesar DOCX '{filename}': {e}")
+                return []
+
+        # Caso 5: Presentación PowerPoint (.pptx)
+        if lower_name.endswith(".pptx"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                    slide_files = sorted([
+                        n for n in zf.namelist()
+                        if n.startswith("ppt/slides/slide") and n.endswith(".xml")
+                    ])
+                    slides_text = []
+                    for sf in slide_files:
+                        tree = ET.fromstring(zf.read(sf))
+                        texts = [
+                            node.text
+                            for node in tree.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t")
+                            if node.text
+                        ]
+                        if texts:
+                            slides_text.append(" ".join(texts))
+                    if slides_text:
+                        full_text = "\n\n".join(slides_text)
+                        if full_text.strip():
+                            extracted.append((filename, full_text))
+                return extracted
+            except Exception as e:
+                logger.warning(f"Error al procesar PPTX '{filename}': {e}")
+                return []
+
+        # Caso 6: Hoja de cálculo Excel (.xlsx)
+        if lower_name.endswith(".xlsx"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                    if "xl/sharedStrings.xml" in zf.namelist():
+                        tree = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+                        texts = [
+                            node.text
+                            for node in tree.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                            if node.text
+                        ]
+                        if texts:
+                            full_text = "\n".join(texts)
+                            if full_text.strip():
+                                extracted.append((filename, full_text))
+                return extracted
+            except Exception as e:
+                logger.warning(f"Error al procesar XLSX '{filename}': {e}")
+                return []
+
+        # Caso 7: Archivo PDF
         if lower_name.endswith(".pdf"):
             try:
                 reader = PdfReader(io.BytesIO(content))
@@ -122,32 +290,87 @@ class VectorService:
                 logger.warning(f"Error al procesar PDF '{filename}': {e}")
                 return []
 
-        # Descartar archivos binarios no textuales conocidos (imágenes, medios, ejecutables, etc.)
+        # Caso 8: Archivos de código fuente conocidos, scripts, logs y formatos de configuración
+        code_text_extensions = {
+            # Python
+            ".py", ".pyw", ".pyx", ".pxd", ".pxi", ".pyi", ".ipynb",
+            # PHP
+            ".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phps",
+            # JavaScript / TypeScript / Web
+            ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx",
+            ".vue", ".svelte", ".astro", ".html", ".htm", ".xhtml",
+            ".css", ".scss", ".sass", ".less", ".styl", ".svg",
+            # Java / JVM
+            ".java", ".kt", ".kts", ".scala", ".sc", ".groovy", ".gvy", ".clj", ".cljs", ".cljc", ".edn",
+            # C / C++ / Objective-C
+            ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".c++", ".h++", ".inl", ".tpp", ".ipp",
+            ".m", ".mm",
+            # C# / .NET / F# / VB
+            ".cs", ".csx", ".vb", ".vbs", ".fs", ".fsx", ".fsi", ".xaml", ".csproj", ".sln", ".vbproj", ".fsproj",
+            # Go / Rust / Swift / Dart
+            ".go", ".mod", ".sum", ".rs", ".rlib", ".swift", ".dart",
+            # Ruby / Perl / Lua / R
+            ".rb", ".rbw", ".rake", ".gemspec", ".pl", ".pm", ".t", ".lua", ".r", ".rmd",
+            # Shell / Scripts
+            ".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh", ".tcsh", ".bat", ".cmd", ".ps1", ".psm1", ".psd1",
+            # Datos / Serialización / Configuración
+            ".json", ".json5", ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf", ".config",
+            ".env", ".properties", ".proto", ".avsc", ".thrift", ".csv", ".tsv",
+            # SQL / Bases de datos
+            ".sql", ".prisma", ".graphql", ".gql", ".cql", ".pgsql", ".plsql",
+            # Logs y diagnósticos
+            ".log", ".out", ".err", ".trace", ".diag",
+            # Documentación y marcado
+            ".md", ".markdown", ".rst", ".txt", ".tex", ".latex", ".asciidoc", ".adoc",
+            # DevOps y Build
+            ".dockerfile", ".dockerignore", ".gitignore", ".gitattributes", ".editorconfig",
+            ".tf", ".tfvars", ".hcl", ".gradle", ".cmake"
+        }
+
+        code_text_filenames = {
+            "dockerfile", "containerfile", "makefile", "gnumakefile",
+            "cmakelists.txt", "gemfile", "rakefile", "vagrantfile",
+            "procfile", "jenkinsfile", ".env", ".gitignore",
+            ".dockerignore", ".editorconfig", ".npmrc", ".yarnrc",
+            "composer.json", "composer.lock", "package.json", "package-lock.json"
+        }
+
+        is_known_code = any(lower_name.endswith(ext) for ext in code_text_extensions) or base_name in code_text_filenames
+
+        # Descartar archivos binarios no textuales (medios, librerías nativas compiladas)
         binary_extensions = (
             ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".tiff",
             ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
             ".tar", ".gz", ".bz2", ".7z", ".rar",
-            ".pyc", ".pyo", ".pyd", ".so", ".dll", ".dylib", ".exe", ".bin",
+            ".pyd", ".so", ".dll", ".dylib", ".exe", ".bin",
             ".woff", ".woff2", ".ttf", ".eot", ".otf",
             ".parquet", ".lance", ".db", ".sqlite",
         )
-        if any(lower_name.endswith(ext) for ext in binary_extensions):
+        if not is_known_code and any(lower_name.endswith(ext) for ext in binary_extensions):
             return []
 
-        # Comprobar presencia de bytes nulos (indicador clásico de archivo binario)
-        if b"\x00" in content[:1024]:
+        # Si no es un archivo de código reconocido, verificar presencia de bytes nulos (indicador de binario genérico)
+        if not is_known_code and b"\x00" in content[:1024]:
             return []
 
-        # Caso 3: Archivos de texto plano / código fuente
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError:
+        # Caso 9: Decodificar texto plano / código fuente
+        text = None
+        for enc in ("utf-8", "latin-1", "utf-16"):
             try:
-                text = content.decode("latin-1")
+                decoded = content.decode(enc)
+                if decoded.strip():
+                    text = decoded
+                    break
             except Exception:
-                text = content.decode("utf-8", errors="replace")
+                pass
 
-        if text.strip():
+        if not text and is_known_code:
+            try:
+                text = content.decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+
+        if text and text.strip():
             extracted.append((filename, text))
 
         return extracted
@@ -159,7 +382,7 @@ class VectorService:
         chunk_size: int = settings.CHUNK_SIZE,
         chunk_overlap: int = settings.CHUNK_OVERLAP,
     ) -> List[Dict[str, Any]]:
-        """Divide un texto en fragmentos (chunks) con solapamiento."""
+        """Divide un texto en fragmentos (chunks) con solapamiento y metadatos de ruta."""
         file_name = os.path.basename(file_path)
         chunks = []
         start = 0
@@ -171,12 +394,14 @@ class VectorService:
             chunk_content = text[start:end].strip()
 
             if chunk_content:
+                # Incluir la ruta del archivo explícitamente en el texto para enriquecer los embeddings y contexto
+                enriched_text = f"[Archivo: {file_path}]\n{chunk_content}"
                 chunks.append({
                     "id": str(uuid.uuid4()),
                     "file_name": file_name,
                     "file_path": file_path,
                     "chunk_index": chunk_idx,
-                    "text": chunk_content,
+                    "text": enriched_text,
                 })
                 chunk_idx += 1
 
@@ -192,8 +417,8 @@ class VectorService:
         for file_path, content in files:
             safe_path = self._safe_relative_path(file_path)
 
-            # Si el archivo es un archivo comprimido ZIP, desempaquetar cada archivo y guardarlo con su ruta
-            if safe_path.lower().endswith(".zip"):
+            # Si el archivo es un archivo comprimido ZIP o JAR, desempaquetar cada archivo y guardarlo con su ruta
+            if safe_path.lower().endswith((".zip", ".jar", ".war", ".ear")):
                 try:
                     with zipfile.ZipFile(io.BytesIO(content)) as zf:
                         for zip_info in zf.infolist():
@@ -206,16 +431,26 @@ class VectorService:
                             if member_path.startswith("__MACOSX/") or "/.git/" in member_path or member_path.startswith(".git/"):
                                 continue
                             sub_content = zf.read(zip_info.filename)
-                            obj_name = f"files/{session_id}/{member_path}"
+                            prefix_jar = "" if safe_path.lower().endswith(".zip") else f"{safe_path}_contents/"
+                            obj_name = f"files/{session_id}/{prefix_jar}{member_path}"
                             self.minio_client.put_object(
                                 bucket_name=self.bucket_name,
                                 object_name=obj_name,
                                 data=io.BytesIO(sub_content),
                                 length=len(sub_content),
                             )
+                    # Si es jar/war/ear, también guardar el archivo original para exportación
+                    if not safe_path.lower().endswith(".zip"):
+                        obj_name = f"files/{session_id}/{safe_path}"
+                        self.minio_client.put_object(
+                            bucket_name=self.bucket_name,
+                            object_name=obj_name,
+                            data=io.BytesIO(content),
+                            length=len(content),
+                        )
                     continue
                 except Exception as e:
-                    logger.warning(f"Error al descomprimir ZIP para almacenamiento individual en MinIO: {e}")
+                    logger.warning(f"Error al desemprimir archivo ZIP/JAR para almacenamiento individual en MinIO: {e}")
 
             # Archivo normal
             obj_name = f"files/{session_id}/{safe_path}"

@@ -65,6 +65,17 @@ class OllamaHarness:
             top_k=settings.VECTOR_TOP_K,
         )
 
+        # 2. Listar todos los archivos indexados/guardados para la sesión
+        session_files = self.vector_svc.list_session_files(session_id)
+        files_manifest = ""
+        if session_files:
+            file_paths = [f["file_path"] for f in session_files]
+            files_manifest = (
+                "\n\n[ESTRUCTURA DE ARCHIVOS Y RUTAS DISPONIBLES EN LA SESIÓN]:\n"
+                + "\n".join(f"- {p}" for p in file_paths)
+                + "\n[FIN DE ESTRUCTURA DE ARCHIVOS]\n"
+            )
+
         rag_block = ""
         if vector_chunks:
             snippets = []
@@ -74,20 +85,29 @@ class OllamaHarness:
                 text = c.get("text", "")
                 snippets.append(f"--- [Fuente: {source} | Chunk: {idx}] ---\n{text}")
             rag_block = (
-                "\n\n[CONTEXTO DE DOCUMENTOS INDEXADOS EN MEMORIA VECTORIAL (LanceDB)]:\n"
+                "\n\n[CONTEXTO DE DOCUMENTOS RELEVANTES INDEXADOS EN MEMORIA VECTORIAL (LanceDB)]:\n"
                 + "\n\n".join(snippets)
                 + "\n[FIN DE CONTEXTO DE DOCUMENTOS]"
             )
 
-        # 2. Contexto inicial / System Prompt (enriquecido con contexto vectorial si existe)
+        # 3. Contexto inicial / System Prompt (enriquecido con estructura de archivos y contexto vectorial)
         system_prompt = session.get("system_prompt", "") or ""
         full_system_content = system_prompt.strip()
 
-        if rag_block:
+        context_block = f"{files_manifest}{rag_block}"
+        if context_block:
+            instruction = (
+                "\n\n[INSTRUCCIONES DE CONTEXTO]:\n"
+                "Tienes acceso directo a la siguiente estructura de archivos, rutas y fragmentos de documentos cargados en tu memoria. "
+                "Cuando el usuario te pregunte sobre qué archivos existen, qué rutas hay, o sobre cualquier detalle de su contenido, "
+                "responde siempre basándote directamente en esta información:"
+            )
             if full_system_content:
-                full_system_content = f"{full_system_content}\n\nUtiliza los siguientes documentos indexados como contexto para responder con precisión cuando sea pertinente:{rag_block}"
+                full_system_content = f"{full_system_content}{instruction}{context_block}"
             else:
-                full_system_content = f"Eres un asistente analítico. Utiliza el siguiente contexto indexado en tu memoria vectorial para fundamentar tus respuestas:{rag_block}"
+                full_system_content = (
+                    f"Eres un asistente analítico experto con acceso a la memoria de archivos y documentos indexados.{instruction}{context_block}"
+                )
 
         if full_system_content:
             messages_payload.append({
@@ -95,7 +115,7 @@ class OllamaHarness:
                 "content": full_system_content,
             })
 
-        # 3. Historial de mensajes previos ordenados cronológicamente
+        # 4. Historial de mensajes previos ordenados cronológicamente
         history = await self.memory_repo.get_messages_by_session(session_id)
         for msg in history:
             messages_payload.append({
@@ -103,7 +123,7 @@ class OllamaHarness:
                 "content": msg["content"],
             })
 
-        # 4. Nuevo mensaje del usuario
+        # 5. Nuevo mensaje del usuario
         messages_payload.append({
             "role": "user",
             "content": new_user_message.strip(),
@@ -149,7 +169,7 @@ class OllamaHarness:
         if vector_chunks:
             extra_metadata["vector_chunks_used"] = len(vector_chunks)
             extra_metadata["vector_sources"] = list(
-                set(c.get("file_path") or c.get("file_name", "") for c in vector_chunks)
+                dict.fromkeys(c.get("file_path") or c.get("file_name", "") for c in vector_chunks)
             )
 
         # 4. Persistir mensaje del usuario en MongoDB (colección 'memory')

@@ -27,9 +27,9 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
     # Vector RAG Settings
-    CHUNK_SIZE: int = 500
-    CHUNK_OVERLAP: int = 50
-    VECTOR_TOP_K: int = 5
+    CHUNK_SIZE: int = 800
+    CHUNK_OVERLAP: int = 100
+    VECTOR_TOP_K: int = 10
 
     model_config = SettingsConfigDict(
         env_file=(".env", "app/.env"),

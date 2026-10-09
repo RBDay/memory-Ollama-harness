@@ -186,10 +186,16 @@ def collect_files_from_paths(paths: List[str]) -> List[tuple]:
     Ignora carpetas de control de versiones y entornos virtuales.
     """
     collected: List[tuple] = []
-    ignored_patterns = {".git", "__pycache__", ".venv", "venv", ".idea", ".vscode", ".DS_Store"}
+    ignored_patterns = {".git", ".svn", ".hg", ".venv", "venv", ".idea", ".vscode", ".DS_Store"}
+    allowed_dotfiles = {
+        ".env", ".env.local", ".env.production", ".env.development", ".env.example",
+        ".gitignore", ".dockerignore", ".editorconfig", ".eslintrc", ".prettierrc",
+        ".babelrc", ".npmrc", ".yarnrc", ".mvn"
+    }
 
     for p in paths:
-        abs_p = os.path.abspath(p)
+        clean_p = p.strip().strip("'\"")
+        abs_p = os.path.abspath(clean_p)
         if not os.path.exists(abs_p):
             raise FileNotFoundError(f"No se encontró la ruta: '{p}'")
 
@@ -200,9 +206,11 @@ def collect_files_from_paths(paths: List[str]) -> List[tuple]:
         elif os.path.isdir(abs_p):
             root_name = os.path.basename(abs_p) or "carpeta"
             for root, dirs, files in os.walk(abs_p):
-                dirs[:] = [d for d in dirs if d not in ignored_patterns and not d.startswith(".")]
+                dirs[:] = [d for d in dirs if d not in ignored_patterns and not (d.startswith(".") and d != ".mvn")]
                 for fname in files:
-                    if fname in ignored_patterns or fname.startswith("."):
+                    if fname in ignored_patterns:
+                        continue
+                    if fname.startswith(".") and fname not in allowed_dotfiles:
                         continue
                     full_file = os.path.join(root, fname)
                     rel_to_dir = os.path.relpath(full_file, abs_p).replace("\\", "/")
