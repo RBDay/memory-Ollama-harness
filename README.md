@@ -157,3 +157,6 @@ Memory_Ollama/
 1. **Colección `sessions`:** Almacena los metadatos de la sesión, título, modelo asignado y su `system_prompt` (contexto inicial).
 2. **Colección `memory`:** Cada interacción guarda de forma individual los mensajes del usuario y del asistente vinculados al `session_id`.
 3. **El Harness:** Antes de consultar a Ollama, el Harness recupera el contexto inicial de la sesión más todo el historial cronológico de la colección `memory`, compone el array de mensajes para Ollama y, al recibir la respuesta, la persiste automáticamente en MongoDB.
+
+## 🧠 ¿Quieres información detallada?
+Consulta el archivo `MEMORY.md` para obtener una visión más profunda de cómo la persistencia de memoria está implementada en el proyecto.
