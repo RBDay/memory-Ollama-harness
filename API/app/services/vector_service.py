@@ -20,6 +20,7 @@ from app.services.ollama_service import ollama_service
 
 logger = logging.getLogger("uvicorn")
 
+#hay que refractorizar algunas funciones
 
 class VectorService:
     """
