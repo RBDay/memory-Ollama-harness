@@ -5,11 +5,9 @@ import uuid
 import zipfile
 import logging
 import xml.etree.ElementTree as ET
-import dis
-import marshal
 import struct
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import pyarrow as pa
 import lancedb
 from minio import Minio
@@ -20,50 +18,9 @@ from app.services.ollama_service import ollama_service
 
 logger = logging.getLogger("uvicorn")
 
-#hay que refractorizar algunas funciones
 
-class VectorService:
-    """
-    Servicio de memoria vectorial persistente utilizando LanceDB con backend de almacenamiento MinIO (S3).
-    Gestiona la ingesta de archivos (texto, código, PDFs, archivos comprimidos ZIP), generación de embeddings
-    con Ollama, almacenamiento en LanceDB en MinIO, búsqueda semántica y exportación recursiva.
-    """
-
-    def __init__(self):
-        # Limpiar el endpoint para el SDK de MinIO (requiere host:puerto sin scheme)
-        endpoint_clean = (
-            settings.MINIO_ENDPOINT.replace("http://", "")
-            .replace("https://", "")
-            .rstrip("/")
-        )
-        self.minio_endpoint = endpoint_clean
-        self.minio_client = Minio(
-            endpoint_clean,
-            access_key=settings.MINIO_ACCESS_KEY,
-            secret_key=settings.MINIO_SECRET_KEY,
-            secure=settings.MINIO_SECURE,
-        )
-        self.bucket_name = settings.MINIO_BUCKET
-        self.storage_options = {
-            "aws_endpoint": f"http://{endpoint_clean}" if not settings.MINIO_SECURE else f"https://{endpoint_clean}",
-            "aws_access_key_id": settings.MINIO_ACCESS_KEY,
-            "aws_secret_access_key": settings.MINIO_SECRET_KEY,
-            "aws_region": settings.MINIO_REGION,
-            "allow_http": "true" if not settings.MINIO_SECURE else "false",
-        }
-
-    def ensure_bucket(self):
-        """Garantiza que el bucket de MinIO para LanceDB exista."""
-        try:
-            if not self.minio_client.bucket_exists(self.bucket_name):
-                self.minio_client.make_bucket(self.bucket_name)
-                logger.info(f"Bucket '{self.bucket_name}' creado en MinIO con éxito.")
-        except Exception as e:
-            logger.error(f"Error al verificar/crear bucket '{self.bucket_name}' en MinIO: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No se pudo conectar con MinIO para preparar el almacenamiento vectorial.",
-            ) from e
+class FileProcessor:
+    """Clase encargada de procesar y extraer contenido textual de archivos."""
 
     @staticmethod
     def _safe_relative_path(file_path: str) -> str:
@@ -79,10 +36,6 @@ class VectorService:
                 detail=f"Ruta de archivo no válida: {file_path!r}",
             )
         return normalized
-
-    def get_session_db_uri(self, session_id: str) -> str:
-        """Retorna la URI S3 de LanceDB para la sesión."""
-        return f"s3://{self.bucket_name}/sessions/{session_id}"
 
     @staticmethod
     def _extract_java_class(content: bytes) -> str:
@@ -159,222 +112,53 @@ class VectorService:
 
         return []
 
-    def extract_text_from_file(self, filename: str, content: bytes) -> List[Tuple[str, str]]:
-        """
-        Extrae el contenido textual de un archivo o conjunto de archivos (si es ZIP/JAR).
-        Soporta archivos de programación (.php, .py, .js, .ts, .java, .c, .cpp, .cs, .go, .rs, .rb, etc.),
-        bytecode (.pyc, .pyo, .class), empaquetados (.jar, .war, .zip), logs (.log), documentos Office y PDF.
-        Retorna una lista de tuplas (ruta_relativa, texto).
-        """
-        lower_name = filename.lower()
-        base_name = os.path.basename(lower_name)
-        extracted: List[Tuple[str, str]] = []
 
-        # Caso 1: Archivo ZIP o JAR/WAR/EAR (descomprimir y procesar de manera recursiva)
-        if lower_name.endswith((".zip", ".jar", ".war", ".ear")):
-            try:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    for zip_info in zf.infolist():
-                        if zip_info.is_dir():
-                            continue
-                        try:
-                            member_path = self._safe_relative_path(zip_info.filename)
-                        except HTTPException:
-                            continue
-                        # Omitir archivos del sistema o metadatos
-                        if member_path.startswith("__MACOSX/") or "/.git/" in member_path or member_path.startswith(".git/"):
-                            continue
-                        sub_content = zf.read(zip_info.filename)
-                        sub_extracted = self.extract_text_from_file(member_path, sub_content)
-                        extracted.extend(sub_extracted)
-                return extracted
-            except Exception as e:
-                logger.warning(f"Error al descomprimir archivo ZIP/JAR '{filename}': {e}")
-                return []
+class VectorService:
+    """
+    Servicio de memoria vectorial persistente utilizando LanceDB con backend de almacenamiento MinIO (S3).
+    Gestiona la ingesta de archivos (texto, código, PDFs, archivos comprimidos ZIP), generación de embeddings
+    con Ollama, almacenamiento en LanceDB en MinIO, búsqueda semántica y exportación recursiva.
+    """
 
-        # Caso 2: Archivos compilados Python (.pyc, .pyo)
-        if lower_name.endswith((".pyc", ".pyo")):
-            return self._disassemble_pyc(filename, content)
-
-        # Caso 3: Archivos compilados Java (.class)
-        if lower_name.endswith(".class"):
-            class_text = self._extract_java_class(content)
-            if class_text:
-                return [(filename, class_text)]
-            return []
-
-        # Caso 4: Documento Word (.docx)
-        if lower_name.endswith(".docx"):
-            try:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    if "word/document.xml" in zf.namelist():
-                        xml_content = zf.read("word/document.xml")
-                        tree = ET.fromstring(xml_content)
-                        paragraphs = []
-                        for p in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
-                            texts = [
-                                node.text
-                                for node in p.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
-                                if node.text
-                            ]
-                            if texts:
-                                paragraphs.append("".join(texts))
-                        full_text = "\n\n".join(paragraphs)
-                        if full_text.strip():
-                            extracted.append((filename, full_text))
-                return extracted
-            except Exception as e:
-                logger.warning(f"Error al procesar DOCX '{filename}': {e}")
-                return []
-
-        # Caso 5: Presentación PowerPoint (.pptx)
-        if lower_name.endswith(".pptx"):
-            try:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    slide_files = sorted([
-                        n for n in zf.namelist()
-                        if n.startswith("ppt/slides/slide") and n.endswith(".xml")
-                    ])
-                    slides_text = []
-                    for sf in slide_files:
-                        tree = ET.fromstring(zf.read(sf))
-                        texts = [
-                            node.text
-                            for node in tree.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t")
-                            if node.text
-                        ]
-                        if texts:
-                            slides_text.append(" ".join(texts))
-                    if slides_text:
-                        full_text = "\n\n".join(slides_text)
-                        if full_text.strip():
-                            extracted.append((filename, full_text))
-                return extracted
-            except Exception as e:
-                logger.warning(f"Error al procesar PPTX '{filename}': {e}")
-                return []
-
-        # Caso 6: Hoja de cálculo Excel (.xlsx)
-        if lower_name.endswith(".xlsx"):
-            try:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    if "xl/sharedStrings.xml" in zf.namelist():
-                        tree = ET.fromstring(zf.read("xl/sharedStrings.xml"))
-                        texts = [
-                            node.text
-                            for node in tree.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
-                            if node.text
-                        ]
-                        if texts:
-                            full_text = "\n".join(texts)
-                            if full_text.strip():
-                                extracted.append((filename, full_text))
-                return extracted
-            except Exception as e:
-                logger.warning(f"Error al procesar XLSX '{filename}': {e}")
-                return []
-
-        # Caso 7: Archivo PDF
-        if lower_name.endswith(".pdf"):
-            try:
-                reader = PdfReader(io.BytesIO(content))
-                text_pages = []
-                for i, page in enumerate(reader.pages):
-                    page_text = page.extract_text() or ""
-                    if page_text.strip():
-                        text_pages.append(f"--- Página {i+1} ---\n{page_text}")
-                full_text = "\n\n".join(text_pages)
-                if full_text.strip():
-                    extracted.append((filename, full_text))
-                return extracted
-            except Exception as e:
-                logger.warning(f"Error al procesar PDF '{filename}': {e}")
-                return []
-
-        # Caso 8: Archivos de código fuente conocidos, scripts, logs y formatos de configuración
-        code_text_extensions = {
-            # Python
-            ".py", ".pyw", ".pyx", ".pxd", ".pxi", ".pyi", ".ipynb",
-            # PHP
-            ".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phps",
-            # JavaScript / TypeScript / Web
-            ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx",
-            ".vue", ".svelte", ".astro", ".html", ".htm", ".xhtml",
-            ".css", ".scss", ".sass", ".less", ".styl", ".svg",
-            # Java / JVM
-            ".java", ".kt", ".kts", ".scala", ".sc", ".groovy", ".gvy", ".clj", ".cljs", ".cljc", ".edn",
-            # C / C++ / Objective-C
-            ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".c++", ".h++", ".inl", ".tpp", ".ipp",
-            ".m", ".mm",
-            # C# / .NET / F# / VB
-            ".cs", ".csx", ".vb", ".vbs", ".fs", ".fsx", ".fsi", ".xaml", ".csproj", ".sln", ".vbproj", ".fsproj",
-            # Go / Rust / Swift / Dart
-            ".go", ".mod", ".sum", ".rs", ".rlib", ".swift", ".dart",
-            # Ruby / Perl / Lua / R
-            ".rb", ".rbw", ".rake", ".gemspec", ".pl", ".pm", ".t", ".lua", ".r", ".rmd",
-            # Shell / Scripts
-            ".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh", ".tcsh", ".bat", ".cmd", ".ps1", ".psm1", ".psd1",
-            # Datos / Serialización / Configuración
-            ".json", ".json5", ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf", ".config",
-            ".env", ".properties", ".proto", ".avsc", ".thrift", ".csv", ".tsv",
-            # SQL / Bases de datos
-            ".sql", ".prisma", ".graphql", ".gql", ".cql", ".pgsql", ".plsql",
-            # Logs y diagnósticos
-            ".log", ".out", ".err", ".trace", ".diag",
-            # Documentación y marcado
-            ".md", ".markdown", ".rst", ".txt", ".tex", ".latex", ".asciidoc", ".adoc",
-            # DevOps y Build
-            ".dockerfile", ".dockerignore", ".gitignore", ".gitattributes", ".editorconfig",
-            ".tf", ".tfvars", ".hcl", ".gradle", ".cmake"
-        }
-
-        code_text_filenames = {
-            "dockerfile", "containerfile", "makefile", "gnumakefile",
-            "cmakelists.txt", "gemfile", "rakefile", "vagrantfile",
-            "procfile", "jenkinsfile", ".env", ".gitignore",
-            ".dockerignore", ".editorconfig", ".npmrc", ".yarnrc",
-            "composer.json", "composer.lock", "package.json", "package-lock.json"
-        }
-
-        is_known_code = any(lower_name.endswith(ext) for ext in code_text_extensions) or base_name in code_text_filenames
-
-        # Descartar archivos binarios no textuales (medios, librerías nativas compiladas)
-        binary_extensions = (
-            ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".tiff",
-            ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
-            ".tar", ".gz", ".bz2", ".7z", ".rar",
-            ".pyd", ".so", ".dll", ".dylib", ".exe", ".bin",
-            ".woff", ".woff2", ".ttf", ".eot", ".otf",
-            ".parquet", ".lance", ".db", ".sqlite",
+    def __init__(self):
+        # Limpiar el endpoint para el SDK de MinIO (requiere host:puerto sin scheme)
+        endpoint_clean = (
+            settings.MINIO_ENDPOINT.replace("http://", "")
+            .replace("https://", "")
+            .rstrip("/")
         )
-        if not is_known_code and any(lower_name.endswith(ext) for ext in binary_extensions):
-            return []
+        self.minio_endpoint = endpoint_clean
+        self.minio_client = Minio(
+            endpoint_clean,
+            access_key=settings.MINIO_ACCESS_KEY,
+            secret_key=settings.MINIO_SECRET_KEY,
+            secure=settings.MINIO_SECURE,
+        )
+        self.bucket_name = settings.MINIO_BUCKET
+        self.storage_options = {
+            "aws_endpoint": f"http://{endpoint_clean}" if not settings.MINIO_SECURE else f"https://{endpoint_clean}",
+            "aws_access_key_id": settings.MINIO_ACCESS_KEY,
+            "aws_secret_access_key": settings.MINIO_SECRET_KEY,
+            "aws_region": settings.MINIO_REGION,
+            "allow_http": "true" if not settings.MINIO_SECURE else "false",
+        }
 
-        # Si no es un archivo de código reconocido, verificar presencia de bytes nulos (indicador de binario genérico)
-        if not is_known_code and b"\x00" in content[:1024]:
-            return []
+    def ensure_bucket(self):
+        """Garantiza que el bucket de MinIO para LanceDB exista."""
+        try:
+            if not self.minio_client.bucket_exists(self.bucket_name):
+                self.minio_client.make_bucket(self.bucket_name)
+                logger.info(f"Bucket '{self.bucket_name}' creado en MinIO con éxito.")
+        except Exception as e:
+            logger.error(f"Error al verificar/crear bucket '{self.bucket_name}' en MinIO: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No se pudo conectar con MinIO para preparar el almacenamiento vectorial.",
+            ) from e
 
-        # Caso 9: Decodificar texto plano / código fuente
-        text = None
-        for enc in ("utf-8", "latin-1", "utf-16"):
-            try:
-                decoded = content.decode(enc)
-                if decoded.strip():
-                    text = decoded
-                    break
-            except Exception:
-                pass
-
-        if not text and is_known_code:
-            try:
-                text = content.decode("utf-8", errors="replace")
-            except Exception:
-                text = ""
-
-        if text and text.strip():
-            extracted.append((filename, text))
-
-        return extracted
+    def get_session_db_uri(self, session_id: str) -> str:
+        """Retorna la URI S3 de LanceDB para la sesión."""
+        return f"s3://{self.bucket_name}/sessions/{session_id}"
 
     def chunk_text(
         self,
@@ -451,7 +235,7 @@ class VectorService:
                         )
                     continue
                 except Exception as e:
-                    logger.warning(f"Error al desemprimir archivo ZIP/JAR para almacenamiento individual en MinIO: {e}")
+                    logger.warning(f"Error al desempaquetar archivo ZIP/JAR para almacenamiento individual en MinIO: {e}")
 
             # Archivo normal
             obj_name = f"files/{session_id}/{safe_path}"
