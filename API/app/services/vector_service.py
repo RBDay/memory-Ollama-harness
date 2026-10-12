@@ -27,7 +27,9 @@ class FileProcessor:
     @staticmethod
     def _safe_relative_path(file_path: str) -> str:
         """Normaliza una ruta subida asegurando que sea relativa y segura."""
-        clean = (file_path or "").replace("\\", "/").strip().lstrip("/")
+        if not file_path:
+            return ""
+        clean = file_path.replace("\\", "/").strip().lstrip("/")
         normalized = posixpath.normpath(clean)
         if normalized in ("", ".", "..") or normalized.startswith("../"):
             base = posixpath.basename(clean)
@@ -215,6 +217,7 @@ class VectorService:
                                 member_path = self._safe_relative_path(zip_info.filename)
                             except HTTPException:
                                 continue
+                            # Omitir archivos del sistema o metadatos
                             if member_path.startswith("__MACOSX/") or "/.git/" in member_path or member_path.startswith(".git/"):
                                 continue
                             sub_content = zf.read(zip_info.filename)
